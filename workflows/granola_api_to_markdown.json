@@ -1,0 +1,440 @@
+{
+  "name": "Granola API to Markdown (Primary)",
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "nodes": [
+    {
+      "id": "schedule",
+      "name": "Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        240,
+        320
+      ],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "load-checkpoint",
+      "name": "Load Checkpoint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        320
+      ],
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst env = {\n  granolaApiBaseUrl: $env.GRANOLA_API_BASE_URL || 'https://api.granola.ai/v1',\n  exportFolders: ($env.GRANOLA_EXPORT_FOLDERS || 'Exports/Markdown,Exports/1to1,Exports/Meetings').split(',').map(v => v.trim()).filter(Boolean),\n  includeTranscript: String($env.INCLUDE_TRANSCRIPT || 'true').toLowerCase() === 'true',\n  notesVaultRoot: ($env.NOTES_VAULT_ROOT || '/data/notes').replace(/\\/$/, ''),\n  bootstrapUpdatedAfter: $env.GRANOLA_BOOTSTRAP_UPDATED_AFTER || '2026-04-01T00:00:00Z',\n  subpathMap: (() => { try { return JSON.parse($env.OPTIONAL_SUBPATH_MAP || '{}'); } catch { return {}; } })()\n};\nconst checkpointBefore = staticData.granolaCheckpointUpdatedAt || env.bootstrapUpdatedAfter;\nstaticData._run = { checkpointBefore, checkpointAfterCandidate: checkpointBefore, scanned: 0, matched: 0, written: 0, skipped: 0, failed: 0, pages: 0 };\nreturn [{ json: { cursor: '', checkpointBefore, accumulated: [], env } }];\n"
+      }
+    },
+    {
+      "id": "list-notes",
+      "name": "List Notes",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        320
+      ],
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth",
+        "url": "={{$json.env.granolaApiBaseUrl + '/notes'}}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "updated_after",
+              "value": "={{$json.checkpointBefore}}"
+            },
+            {
+              "name": "cursor",
+              "value": "={{$json.cursor}}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "granolaBearerPlaceholder",
+          "name": "Granola Bearer Token"
+        }
+      }
+    },
+    {
+      "id": "accumulate-page",
+      "name": "Accumulate Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        930,
+        320
+      ],
+      "parameters": {
+        "jsCode": "const prev = $('Load Checkpoint').first().json;\nconst page = $json;\nconst notes = Array.isArray(page.notes) ? page.notes : [];\nconst accumulated = (prev.accumulated || []).concat(notes);\nconst staticData = $getWorkflowStaticData('global');\nif (staticData._run) staticData._run.pages += 1;\nreturn [{ json: { ...prev, accumulated, hasMore: Boolean(page.hasMore), cursor: page.cursor || '' } }];\n"
+      }
+    },
+    {
+      "id": "has-more",
+      "name": "Has More?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1160,
+        320
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.hasMore}}",
+              "value2": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "emit-candidates",
+      "name": "Emit Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1380,
+        430
+      ],
+      "parameters": {
+        "jsCode": "const src = $json;\nreturn (src.accumulated || []).map(n => ({ json: { note_id: n.id, updated_at: n.updated_at, checkpointBefore: src.checkpointBefore, env: src.env } }));\n"
+      }
+    },
+    {
+      "id": "loop-candidates",
+      "name": "Loop Candidates",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        1600,
+        430
+      ],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "get-note",
+      "name": "Get Note",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1820,
+        430
+      ],
+      "parameters": {
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "httpBearerAuth",
+        "url": "={{$json.env.granolaApiBaseUrl + '/notes/' + $json.note_id}}",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "include_transcript",
+              "value": "={{$json.env.includeTranscript ? 'true' : 'false'}}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "id": "granolaBearerPlaceholder",
+          "name": "Granola Bearer Token"
+        }
+      }
+    },
+    {
+      "id": "build-markdown",
+      "name": "Build Markdown",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2040,
+        430
+      ],
+      "parameters": {
+        "jsCode": "function slugify(input) {\n  return String(input || '').normalize('NFKD').replace(/[\\u0300-\\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);\n}\nfunction ymd(iso) {\n  const d = new Date(iso);\n  return { yyyy: d.getUTCFullYear(), mm: String(d.getUTCMonth() + 1).padStart(2, '0'), dd: String(d.getUTCDate()).padStart(2, '0') };\n}\nfunction yamlScalar(v) {\n  return String(v).replace(/\\n/g, ' ').replace(/\"/g, '\\\\\"');\n}\nconst staticData = $getWorkflowStaticData('global');\nconst env = $('Loop Candidates').first().json.env;\nconst before = $('Loop Candidates').first().json.checkpointBefore;\nconst note = $json;\nconst folders = (note.folder_membership || []).map(f => typeof f === 'string' ? f : (f.name || '')).filter(Boolean);\nif (staticData._run) staticData._run.scanned += 1;\nif (!folders.some(f => env.exportFolders.includes(f))) {\n  if (staticData._run) staticData._run.skipped += 1;\n  return [{ json: { skipWrite: true, reason: 'outside_export_folder' } }];\n}\nconst noteId = note.id || $('Loop Candidates').first().json.note_id;\nconst title = note.title || (note.calendar_event && note.calendar_event.title) || noteId;\nconst slug = slugify(title) || noteId;\nconst updatedAt = note.updated_at || $('Loop Candidates').first().json.updated_at || before;\nconst createdAt = note.created_at || updatedAt;\nconst d = ymd(createdAt);\nconst chosenFolder = folders.find(f => env.exportFolders.includes(f));\nconst mappedSubpath = env.subpathMap[chosenFolder] || 'meetings';\nconst dir = `${env.notesVaultRoot}/${mappedSubpath}/${d.yyyy}/${d.mm}`.replace(/\\\\+/g, '/');\nconst fileName = `${d.yyyy}-${d.mm}-${d.dd}__${slug}__${noteId}.md`;\nconst filePath = `${dir}/${fileName}`;\nconst front = ['---', 'source: granola', `granola_note_id: ${yamlScalar(noteId)}`];\nif (title) front.push(`title: \"${yamlScalar(title)}\"`);\nif (createdAt) front.push(`created_at: ${createdAt}`);\nif (updatedAt) front.push(`updated_at: ${updatedAt}`);\nif (note.owner && note.owner.name) front.push(`owner_name: \"${yamlScalar(note.owner.name)}\"`);\nif (note.owner && note.owner.email) front.push(`owner_email: \"${yamlScalar(note.owner.email)}\"`);\nif (folders.length) { front.push('folders:'); folders.forEach(f => front.push(`  - \"${yamlScalar(f)}\"`)); }\nconst attendees = Array.isArray(note.attendees) ? note.attendees : [];\nif (attendees.length) { front.push('attendees:'); attendees.forEach(a => front.push(`  - \"${yamlScalar(typeof a === 'string' ? a : (a.name || ''))}\"`)); }\nif (note.calendar_event && note.calendar_event.title) front.push(`calendar_event_title: \"${yamlScalar(note.calendar_event.title)}\"`);\nif (note.calendar_event && note.calendar_event.scheduled_start_time) front.push(`scheduled_start_time: ${note.calendar_event.scheduled_start_time}`);\nif (note.calendar_event && note.calendar_event.scheduled_end_time) front.push(`scheduled_end_time: ${note.calendar_event.scheduled_end_time}`);\nfront.push(`exported_at: ${new Date().toISOString()}`);\nfront.push('---');\nconst summary = note.summary_markdown || note.summary || '';\nconst transcript = Array.isArray(note.transcript) ? note.transcript : [];\nlet markdown = `${front.join('\\n')}\\n\\n# ${title}\\n\\n## Summary\\n\\n${summary || '_No summary provided._'}\\n`;\nif (env.includeTranscript && transcript.length) {\n  markdown += '\\n## Transcript\\n\\n';\n  transcript.forEach(line => {\n    markdown += `- ${(line.speaker || line.speaker_name || 'Speaker')}: ${(line.text || line.content || '')}\\n`;\n  });\n}\nif (staticData._run) {\n  staticData._run.matched += 1;\n  if (updatedAt > staticData._run.checkpointAfterCandidate) staticData._run.checkpointAfterCandidate = updatedAt;\n}\nreturn [{ json: { skipWrite: false, noteId, updatedAt, fileName, filePath, markdown } }];\n"
+      }
+    },
+    {
+      "id": "should-write",
+      "name": "Should Write?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        2260,
+        430
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.skipWrite}}",
+              "value2": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "convert-to-file",
+      "name": "Convert To File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        2480,
+        350
+      ],
+      "parameters": {
+        "operation": "toBinary",
+        "sourceProperty": "markdown",
+        "options": {
+          "fileName": "={{$json.fileName}}",
+          "mimeType": "text/markdown"
+        }
+      }
+    },
+    {
+      "id": "write-file",
+      "name": "Write Markdown File",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        2700,
+        350
+      ],
+      "parameters": {
+        "operation": "write",
+        "fileSelector": "={{$json.filePath}}",
+        "binaryData": true,
+        "dataPropertyName": "data",
+        "options": {}
+      }
+    },
+    {
+      "id": "mark-success",
+      "name": "Mark Success",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2920,
+        350
+      ],
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nif (staticData._run) staticData._run.written += 1;\nreturn items;\n"
+      }
+    },
+    {
+      "id": "update-checkpoint",
+      "name": "Update Checkpoint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3140,
+        430
+      ],
+      "parameters": {
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nconst run = staticData._run || {};\nconst checkpointBefore = run.checkpointBefore || null;\nconst checkpointAfter = run.failed > 0 ? checkpointBefore : (run.checkpointAfterCandidate || checkpointBefore);\nif (run.failed > 0) {\n  throw new Error(`Granola export failed for ${run.failed} note(s). Checkpoint remains ${checkpointBefore}`);\n}\nstaticData.granolaCheckpointUpdatedAt = checkpointAfter;\nreturn [{ json: {\n  notes_scanned: run.scanned || 0,\n  notes_matched: run.matched || 0,\n  notes_written: run.written || 0,\n  notes_skipped: run.skipped || 0,\n  notes_failed: run.failed || 0,\n  checkpoint_before: checkpointBefore,\n  checkpoint_after: checkpointAfter,\n  pages_fetched: run.pages || 0\n} }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "Schedule": {
+      "main": [
+        [
+          {
+            "node": "Load Checkpoint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Checkpoint": {
+      "main": [
+        [
+          {
+            "node": "List Notes",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Notes": {
+      "main": [
+        [
+          {
+            "node": "Accumulate Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Accumulate Page": {
+      "main": [
+        [
+          {
+            "node": "Has More?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has More?": {
+      "main": [
+        [
+          {
+            "node": "List Notes",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Emit Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Emit Candidates": {
+      "main": [
+        [
+          {
+            "node": "Loop Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Candidates": {
+      "main": [
+        [
+          {
+            "node": "Get Note",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Checkpoint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Note": {
+      "main": [
+        [
+          {
+            "node": "Build Markdown",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Markdown": {
+      "main": [
+        [
+          {
+            "node": "Should Write?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should Write?": {
+      "main": [
+        [
+          {
+            "node": "Convert To File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert To File": {
+      "main": [
+        [
+          {
+            "node": "Write Markdown File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Write Markdown File": {
+      "main": [
+        [
+          {
+            "node": "Mark Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Success": {
+      "main": [
+        [
+          {
+            "node": "Loop Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}
